@@ -1,0 +1,20 @@
+name: Check public offline data build capacity
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  capacity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check runtime and available disk
+        run: |
+          python3 --version
+          df -h .
+          python3 - <<'PY'
+          import shutil
+          free = shutil.disk_usage('.').free
+          assert free >= 10_000_000_000, f'Offline pack reconstruction requires 10 GB, available {free}'
+          print('Public runner can reconstruct the pinned offline data pack.')
+          PY
