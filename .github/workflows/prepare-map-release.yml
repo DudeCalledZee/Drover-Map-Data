@@ -1,0 +1,68 @@
+name: Prepare verified UK and Ireland map release
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Existing draft map-data release ID
+        required: true
+        default: '405138384'
+      seed_sha256:
+        description: SHA-256 of the public OSM reconstruction seed
+        required: true
+        default: '5126d86ec4154a20840dc121d5870be193dd3a3ce40398e1d3a2d95e1c68a6b7'
+permissions:
+  contents: write
+concurrency:
+  group: uk-ireland-map-data-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      SEED_SHA256: ${{ inputs.seed_sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate reconstruction tooling
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - name: Download verified public-data seed
+        run: |
+          python3 - <<'PY'
+          import os, re, shutil
+          assert re.fullmatch(r'[0-9]+', os.environ['RELEASE_ID'])
+          assert re.fullmatch(r'[0-9a-f]{64}', os.environ['SEED_SHA256'])
+          assert shutil.disk_usage('.').free >= 8_000_000_000
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" > assets.json
+          python3 - <<'PY' > seed-asset-id.txt
+          import json, os
+          release=json.load(open('release.json'))
+          assert release['tag_name']=='maps-uk-ireland-20261006' and release['draft'] is True
+          assets=json.load(open('assets.json'))
+          seed=next(a for a in assets if a['name']=='drover-map-reconstruction-seed.tar.gz')
+          assert seed['state']=='uploaded' and seed['size']==201700722
+          assert seed['digest']=='sha256:'+os.environ['SEED_SHA256']
+          print(seed['id'])
+          PY
+          asset_id=$(cat seed-asset-id.txt)
+          gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > seed.tar.gz
+      - name: Reconstruct exact map and archive parts from pinned planet ranges
+        run: python3 tools/reconstruct-map-pack.py reconstruct --seed seed.tar.gz --seed-sha256 "$SEED_SHA256" --output rebuilt --workers 4
+      - name: Upload and verify every data part
+        run: |
+          gh release upload maps-uk-ireland-20261006 rebuilt/parts/* --clobber
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" > assets-final.json
+          python3 - <<'PY'
+          import json
+          expected=json.load(open('rebuilt/verified.json'))['parts']
+          assets={a['name']:a for a in json.load(open('assets-final.json'))}
+          for part in expected:
+              actual=assets[part['name']]
+              assert actual['state']=='uploaded'
+              assert actual['size']==part['size']
+              assert actual['digest']=='sha256:'+part['sha256']
+          print('All four remote data parts match their original pinned sizes and SHA-256 values.')
+          PY
